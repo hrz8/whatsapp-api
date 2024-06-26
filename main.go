@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"github.com/skip2/go-qrcode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -27,10 +31,14 @@ var (
 var clients = make(map[string]*whatsmeow.Client)
 var qrs = make(map[string]string)
 
-func eventHandler(evt interface{}) {
-	switch v := evt.(type) {
-	case *events.Message:
-		fmt.Println("Received a message!", v.Message.GetConversation())
+func eventHandler(deviceID string) func(evt interface{}) {
+	return func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.Message:
+			fmt.Println("Received a message!", v.Message.GetExtendedTextMessage().Text)
+		case *events.PairSuccess:
+			qrs[deviceID] = ""
+		}
 	}
 }
 
@@ -41,20 +49,103 @@ func main() {
 		panic(err)
 	}
 	db := stdlib.OpenDBFromPool(conn)
-	store.SetOSInfo("App", [3]uint32{0, 1, 0})
+	store.SetOSInfo("AiConec", [3]uint32{0, 1, 0})
 	container := sqlstore.NewWithDB(db, "postgres", dbLog)
 	err = container.Upgrade()
 	if err != nil {
 		panic(err)
 	}
-	// If you want multiple sessions, remember their JIDs and use .GetDevice(jid) or .GetAllDevices() instead.
-	deviceStore, err := container.GetFirstDevice()
-	if err != nil {
-		panic(err)
-	}
 
 	mux := http.NewServeMux()
-	example(deviceStore)
+
+	mux.HandleFunc("POST /qr", func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			DeviceID string `json:"device_id"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&p)
+		if err != nil {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+
+		var cli *whatsmeow.Client
+		var deviceStore *store.Device
+
+		cli = clients[p.DeviceID]
+		qr := qrs[p.DeviceID]
+
+		if cli == nil {
+			deviceStore = container.NewDevice()
+			cli = whatsmeow.NewClient(deviceStore, waLog.Stdout(p.DeviceID, "INFO", true))
+		}
+
+		if qr != "" {
+			http.Error(w, qr, http.StatusOK)
+			return
+		}
+
+		if cli.IsLoggedIn() {
+			http.Error(w, "already connected", http.StatusOK)
+			return
+		}
+
+		cli.AddEventHandler(eventHandler(p.DeviceID))
+		clients[p.DeviceID] = cli
+
+		ctx, cancel := context.WithCancel(context.Background())
+		qrChan, err := cli.GetQRChannel(ctx)
+		if err != nil {
+			defer cancel()
+			http.Error(w, "already connected", http.StatusOK)
+			return
+		}
+
+		chImg := make(chan string)
+
+		go func() {
+			evt := <-qrChan
+			if evt.Event == "code" {
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				go func() {
+					time.Sleep(evt.Timeout - 10*time.Second)
+					if !cli.IsLoggedIn() {
+						clients[p.DeviceID] = nil
+						qrs[p.DeviceID] = ""
+						cancel()
+					}
+				}()
+				img, err := qrcode.Encode(evt.Code, qrcode.Medium, 512)
+				if err != nil {
+					cancel()
+				}
+				base64Img := base64.StdEncoding.EncodeToString(img)
+				chImg <- "data:image/png;base64," + base64Img
+			} else {
+				fmt.Println("Login event:", evt.Event)
+			}
+		}()
+
+		cli.Connect()
+
+		qr = <-chImg
+		qrs[p.DeviceID] = qr
+		http.Error(w, qr, http.StatusOK)
+	})
+
+	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			DeviceID string `json:"device_id"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&p)
+		if err != nil {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+
+		cli := clients[p.DeviceID]
+		cli.Disconnect()
+		http.Error(w, "ok", http.StatusOK)
+	})
 
 	server := http.Server{
 		Addr:    ":4001",
@@ -83,7 +174,7 @@ func example(deviceStore *store.Device) {
 	var err error
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
-	client.AddEventHandler(eventHandler)
+	// client.AddEventHandler(eventHandler)
 
 	if client.Store.ID == nil {
 		// No ID stored, new login
