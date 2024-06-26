@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/mdp/qrterminal/v3"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -18,8 +21,11 @@ import (
 )
 
 var (
-	DB_URL = "postgresql://user:pwd@localhost:5432/dbname"
+	DB_URL = "postgresql://postgres:toor@localhost:5432/whatsapp_api"
 )
+
+var clients = make(map[string]*whatsmeow.Client)
+var qrs = make(map[string]string)
 
 func eventHandler(evt interface{}) {
 	switch v := evt.(type) {
@@ -28,7 +34,6 @@ func eventHandler(evt interface{}) {
 	}
 }
 
-// ref: https://godocs.io/go.mau.fi/whatsmeow#example-package
 func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 	conn, err := pgxpool.New(context.Background(), DB_URL)
@@ -47,6 +52,35 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	mux := http.NewServeMux()
+	example(deviceStore)
+
+	server := http.Server{
+		Addr:    ":4001",
+		Handler: mux,
+	}
+
+	svErr := make(chan error)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			svErr <- err
+		}
+	}()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case <-c:
+		fmt.Println("signal interrupt triggered")
+	case err := <-svErr:
+		fmt.Println("cannot start server", err.Error())
+	}
+}
+
+func example(deviceStore *store.Device) {
+	var err error
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	client.AddEventHandler(eventHandler)
@@ -76,11 +110,4 @@ func main() {
 			panic(err)
 		}
 	}
-
-	// Listen to Ctrl+C (you can also do something else that prevents the program from exiting)
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	client.Disconnect()
 }
