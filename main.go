@@ -42,6 +42,23 @@ func eventHandler(deviceID string) func(evt interface{}) {
 	}
 }
 
+type Response struct {
+	Message string `json:"name"`
+	Data    any    `json:"data"`
+}
+
+type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
+
+func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	res, err := h(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Header().Add("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
+}
+
 func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 	conn, err := pgxpool.New(context.Background(), DB_URL)
@@ -57,15 +74,14 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /qr", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /qr", Handler(func(w http.ResponseWriter, r *http.Request) (*Response, error) {
 		var p struct {
 			DeviceID string `json:"device_id"`
 		}
 		err := json.NewDecoder(r.Body).Decode(&p)
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
+			// http.Error(w, "server error", http.StatusInternalServerError)
+			return nil, errors.New("server error")
 		}
 
 		var cli *whatsmeow.Client
@@ -80,13 +96,16 @@ func main() {
 		}
 
 		if qr != "" {
-			http.Error(w, qr, http.StatusOK)
-			return
+			// http.Error(w, qr, http.StatusOK)
+			return &Response{
+				Message: "qr not scanned yet",
+				Data:    qr,
+			}, nil
 		}
 
 		if cli.IsLoggedIn() {
-			http.Error(w, "already connected", http.StatusOK)
-			return
+			// http.Error(w, "already connected", http.StatusOK)
+			return nil, errors.New("already connected")
 		}
 
 		cli.AddEventHandler(eventHandler(p.DeviceID))
@@ -96,8 +115,8 @@ func main() {
 		qrChan, err := cli.GetQRChannel(ctx)
 		if err != nil {
 			defer cancel()
-			http.Error(w, "already connected", http.StatusOK)
-			return
+			// http.Error(w, "already connected", http.StatusOK)
+			return nil, errors.New("already connected")
 		}
 
 		chImg := make(chan string)
@@ -109,6 +128,7 @@ func main() {
 				go func() {
 					time.Sleep(evt.Timeout - 10*time.Second)
 					if !cli.IsLoggedIn() {
+						fmt.Println("expiring qr code...")
 						clients[p.DeviceID] = nil
 						qrs[p.DeviceID] = ""
 						cancel()
@@ -129,23 +149,31 @@ func main() {
 
 		qr = <-chImg
 		qrs[p.DeviceID] = qr
-		http.Error(w, qr, http.StatusOK)
-	})
+		// http.Error(w, qr, http.StatusOK)
+		return &Response{
+			Message: "success create qr",
+			Data:    qr,
+		}, nil
+	}))
 
-	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /logout", Handler(func(w http.ResponseWriter, r *http.Request) (*Response, error) {
 		var p struct {
 			DeviceID string `json:"device_id"`
 		}
 		err := json.NewDecoder(r.Body).Decode(&p)
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
+			// http.Error(w, "server error", http.StatusInternalServerError)
+			return nil, errors.New("server error")
 		}
 
 		cli := clients[p.DeviceID]
 		cli.Disconnect()
-		http.Error(w, "ok", http.StatusOK)
-	})
+		// http.Error(w, "ok", http.StatusOK)
+		return &Response{
+			Message: "logout success",
+			Data:    "",
+		}, nil
+	}))
 
 	server := http.Server{
 		Addr:    ":4001",
