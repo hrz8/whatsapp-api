@@ -7,10 +7,18 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+)
+
+var (
+	DB_URL = "postgresql://user:pwd@localhost:5432/dbname"
 )
 
 func eventHandler(evt interface{}) {
@@ -21,9 +29,15 @@ func eventHandler(evt interface{}) {
 }
 
 func main() {
-	dbLog := waLog.Stdout("Database", "DEBUG", true)
-	// Make sure you add appropriate DB connector imports, e.g. github.com/mattn/go-sqlite3 for SQLite
-	container, err := sqlstore.New("sqlite3", "file:examplestore.db?_foreign_keys=on", dbLog)
+	dbLog := waLog.Stdout("Database", "INFO", true)
+	conn, err := pgxpool.New(context.Background(), DB_URL)
+	if err != nil {
+		panic(err)
+	}
+	db := stdlib.OpenDBFromPool(conn)
+	store.SetOSInfo("App", [3]uint32{0, 1, 0})
+	container := sqlstore.NewWithDB(db, "postgres", dbLog)
+	err = container.Upgrade()
 	if err != nil {
 		panic(err)
 	}
@@ -32,7 +46,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	clientLog := waLog.Stdout("Client", "DEBUG", true)
+	clientLog := waLog.Stdout("Client", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	client.AddEventHandler(eventHandler)
 
@@ -48,6 +62,7 @@ func main() {
 				// Render the QR code here
 				// e.g. qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				fmt.Println("QR code:", evt.Code)
 			} else {
 				fmt.Println("Login event:", evt.Event)
