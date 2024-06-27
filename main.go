@@ -30,23 +30,26 @@ var (
 var clients = make(map[string]*whatsmeow.Client)
 var qrs = make(map[string]string)
 
-func eventHandler(deviceID string) func(evt interface{}) {
+func eventHandler(clientDeviceID string) func(evt interface{}) {
 	return func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			fmt.Println("Received a message!", v.Message.GetExtendedTextMessage().Text)
+			fmt.Println("Received a message!", v.Message)
 		case *events.PairSuccess:
-			qrs[deviceID] = ""
+			qrs[clientDeviceID] = ""
 		}
 	}
 }
 
 func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
+	cliLog := waLog.Stdout("abc", "INFO", true)
+
 	conn, err := pgxpool.New(context.Background(), DB_URL)
 	if err != nil {
 		panic(err)
 	}
+
 	db := stdlib.OpenDBFromPool(conn)
 	store.SetOSInfo("AiConec", [3]uint32{0, 1, 0})
 	container := sqlstore.NewWithDB(db, "postgres", dbLog)
@@ -54,10 +57,40 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	m := &Migration{db, dbLog}
+	err = m.Upgrade()
+	if err != nil {
+		fmt.Println("migration upgrade failed", err)
+	}
+	repo := &DeviceRepo{db}
 
+	// restore all connections
+	devices, err := container.GetAllDevices()
+	if err != nil {
+		panic(err)
+	}
+	for _, device := range devices {
+		var dvc *Device
+		jid := device.ID.String()
+		fmt.Println("restoring backup for", jid)
+		dvc, err = repo.GetDeviceByJID(jid)
+		if err != nil {
+			continue
+		}
+		cli := whatsmeow.NewClient(device, cliLog)
+		cli.AddEventHandler(eventHandler(dvc.ClientDeviceID))
+		cli.Connect()
+		clients[dvc.ClientDeviceID] = cli
+		fmt.Println("delete backup", jid, dvc.ClientDeviceID)
+		repo.Reset(dvc.ClientDeviceID)
+	}
+
+	// server
 	mux := http.NewServeMux()
-	mux.Handle("POST /qr", Handler(GenQR(container)))
-	mux.Handle("POST /logout", Handler(Logout()))
+	wa := &WhatsappHandler{container}
+
+	mux.Handle("POST /qr", Handler(wa.GenQR))
+	mux.Handle("POST /logout", Handler(wa.Logout))
 
 	server := http.Server{
 		Addr:    ":4001",
@@ -80,4 +113,14 @@ func main() {
 	case err := <-svErr:
 		fmt.Println("cannot start server", err.Error())
 	}
+
+	// backup
+	defer func() {
+		for deviceClientID, cli := range clients {
+			if cli.Store.ID != nil {
+				fmt.Println("backing up for", deviceClientID)
+				repo.SetJID(deviceClientID, cli.Store.ID.String())
+			}
+		}
+	}()
 }
