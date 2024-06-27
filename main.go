@@ -2,18 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
-
-	"github.com/mdp/qrterminal/v3"
-	"github.com/skip2/go-qrcode"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -22,6 +16,11 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+)
+
+var (
+	ErrServerUnexpected = errors.New("server error occurred")
+	ErrAlreadyConnected = errors.New("device already connected")
 )
 
 var (
@@ -42,23 +41,6 @@ func eventHandler(deviceID string) func(evt interface{}) {
 	}
 }
 
-type Response struct {
-	Message string `json:"name"`
-	Data    any    `json:"data"`
-}
-
-type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
-
-func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	res, err := h(w, r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Header().Add("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
-}
-
 func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
 	conn, err := pgxpool.New(context.Background(), DB_URL)
@@ -74,106 +56,8 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /qr", Handler(func(w http.ResponseWriter, r *http.Request) (*Response, error) {
-		var p struct {
-			DeviceID string `json:"device_id"`
-		}
-		err := json.NewDecoder(r.Body).Decode(&p)
-		if err != nil {
-			// http.Error(w, "server error", http.StatusInternalServerError)
-			return nil, errors.New("server error")
-		}
-
-		var cli *whatsmeow.Client
-		var deviceStore *store.Device
-
-		cli = clients[p.DeviceID]
-		qr := qrs[p.DeviceID]
-
-		if cli == nil {
-			deviceStore = container.NewDevice()
-			cli = whatsmeow.NewClient(deviceStore, waLog.Stdout(p.DeviceID, "INFO", true))
-		}
-
-		if qr != "" {
-			// http.Error(w, qr, http.StatusOK)
-			return &Response{
-				Message: "qr not scanned yet",
-				Data:    qr,
-			}, nil
-		}
-
-		if cli.IsLoggedIn() {
-			// http.Error(w, "already connected", http.StatusOK)
-			return nil, errors.New("already connected")
-		}
-
-		cli.AddEventHandler(eventHandler(p.DeviceID))
-		clients[p.DeviceID] = cli
-
-		ctx, cancel := context.WithCancel(context.Background())
-		qrChan, err := cli.GetQRChannel(ctx)
-		if err != nil {
-			defer cancel()
-			// http.Error(w, "already connected", http.StatusOK)
-			return nil, errors.New("already connected")
-		}
-
-		chImg := make(chan string)
-
-		go func() {
-			evt := <-qrChan
-			if evt.Event == "code" {
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				go func() {
-					time.Sleep(evt.Timeout - 10*time.Second)
-					if !cli.IsLoggedIn() {
-						fmt.Println("expiring qr code...")
-						clients[p.DeviceID] = nil
-						qrs[p.DeviceID] = ""
-						cancel()
-					}
-				}()
-				img, err := qrcode.Encode(evt.Code, qrcode.Medium, 512)
-				if err != nil {
-					cancel()
-				}
-				base64Img := base64.StdEncoding.EncodeToString(img)
-				chImg <- "data:image/png;base64," + base64Img
-			} else {
-				fmt.Println("Login event:", evt.Event)
-			}
-		}()
-
-		cli.Connect()
-
-		qr = <-chImg
-		qrs[p.DeviceID] = qr
-		// http.Error(w, qr, http.StatusOK)
-		return &Response{
-			Message: "success create qr",
-			Data:    qr,
-		}, nil
-	}))
-
-	mux.Handle("POST /logout", Handler(func(w http.ResponseWriter, r *http.Request) (*Response, error) {
-		var p struct {
-			DeviceID string `json:"device_id"`
-		}
-		err := json.NewDecoder(r.Body).Decode(&p)
-		if err != nil {
-			// http.Error(w, "server error", http.StatusInternalServerError)
-			return nil, errors.New("server error")
-		}
-
-		cli := clients[p.DeviceID]
-		cli.Disconnect()
-		// http.Error(w, "ok", http.StatusOK)
-		return &Response{
-			Message: "logout success",
-			Data:    "",
-		}, nil
-	}))
+	mux.Handle("POST /qr", Handler(GenQR(container)))
+	mux.Handle("POST /logout", Handler(Logout()))
 
 	server := http.Server{
 		Addr:    ":4001",
@@ -195,38 +79,5 @@ func main() {
 		fmt.Println("signal interrupt triggered")
 	case err := <-svErr:
 		fmt.Println("cannot start server", err.Error())
-	}
-}
-
-func example(deviceStore *store.Device) {
-	var err error
-	clientLog := waLog.Stdout("Client", "INFO", true)
-	client := whatsmeow.NewClient(deviceStore, clientLog)
-	// client.AddEventHandler(eventHandler)
-
-	if client.Store.ID == nil {
-		// No ID stored, new login
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			panic(err)
-		}
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				// Render the QR code here
-				// e.g. qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				fmt.Println("QR code:", evt.Code)
-			} else {
-				fmt.Println("Login event:", evt.Event)
-			}
-		}
-	} else {
-		// Already logged in, just connect
-		err = client.Connect()
-		if err != nil {
-			panic(err)
-		}
 	}
 }
