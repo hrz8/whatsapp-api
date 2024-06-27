@@ -51,7 +51,7 @@ func main() {
 	}
 
 	db := stdlib.OpenDBFromPool(conn)
-	store.SetOSInfo("AiConec", [3]uint32{0, 1, 0})
+	store.SetOSInfo("YourApp", [3]uint32{0, 1, 0})
 	container := sqlstore.NewWithDB(db, "postgres", dbLog)
 	err = container.Upgrade()
 	if err != nil {
