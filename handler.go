@@ -18,25 +18,69 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-type Response struct {
-	Message string `json:"name"`
-	Result  any    `json:"result"`
-}
+type ErrCode string
 
-type HandlerError struct {
-	Code int `json:"code"`
+const (
+	EServerUnexpected ErrCode = "E000"
+	EAlreadyConnected ErrCode = "E001"
+)
+
+var (
+	ErrServerUnexpected = HTTPError{errors.New("server error occurred"), http.StatusInternalServerError, map[string]any{}, EServerUnexpected}
+	ErrAlreadyConnected = HTTPError{errors.New("device already connected"), http.StatusBadRequest, map[string]any{}, EServerUnexpected}
+)
+
+var (
+	ResponseErrUnexpected = &Response{
+		Status:  http.StatusInternalServerError,
+		Message: http.StatusText(http.StatusInternalServerError),
+		Result:  nil,
+		Error: &HTTPError{
+			Status: http.StatusInternalServerError,
+			Data:   nil,
+			Code:   EServerUnexpected,
+		},
+	}
+)
+
+type Response struct {
+	Status  int        `json:"status"`
+	Message string     `json:"name"`
+	Result  any        `json:"result"`
+	Error   *HTTPError `json:"error"`
 }
 
 type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := recover(); err != nil {
+			json.NewEncoder(w).Encode(ResponseErrUnexpected)
+			return
+		}
+	}()
+
+	w.Header().Add("Content-Type", "application/json")
+	var handlerErr HTTPError
+
 	res, err := h(w, r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if errors.As(err, &handlerErr) {
+		w.WriteHeader(handlerErr.Status)
+		resErr := &Response{
+			Status:  handlerErr.Status,
+			Message: handlerErr.Error(),
+			Result:  nil,
+			Error:   &handlerErr,
+		}
+		json.NewEncoder(w).Encode(resErr)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Header().Add("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ResponseErrUnexpected)
+		return
+	}
+	w.WriteHeader(res.Status)
 	json.NewEncoder(w).Encode(res)
 }
 
@@ -44,18 +88,13 @@ type WhatsappHandler struct {
 	store *sqlstore.Container
 }
 
-// func NewWhatsappHandler(store *sqlstore.Container) *WhatsappHandler {
-// 	return &WhatsappHandler{store}
-// }
-
 func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Response, error) {
 	var p struct {
 		ClientDeviceID string `json:"client_device_id"`
 	}
 	err := json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		// http.Error(w, "server error", http.StatusInternalServerError)
-		return nil, errors.New("server error")
+		return nil, ErrServerUnexpected
 	}
 
 	var cli *whatsmeow.Client
@@ -70,16 +109,16 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 	}
 
 	if qr != "" {
-		// http.Error(w, qr, http.StatusOK)
 		return &Response{
+			Status:  http.StatusOK,
 			Message: "qr not scanned yet",
 			Result:  map[string]string{"qr": qr},
+			Error:   nil,
 		}, nil
 	}
 
 	if cli.IsLoggedIn() {
-		// http.Error(w, "already connected", http.StatusOK)
-		return nil, errors.New("already connected")
+		return nil, ErrAlreadyConnected
 	}
 
 	cli.AddEventHandler(eventHandler(p.ClientDeviceID))
@@ -89,8 +128,7 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 	qrChan, err := cli.GetQRChannel(ctx)
 	if err != nil {
 		defer cancel()
-		// http.Error(w, "already connected", http.StatusOK)
-		return nil, errors.New("already connected")
+		return nil, ErrAlreadyConnected
 	}
 
 	chImg := make(chan string)
@@ -123,10 +161,11 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 
 	qr = <-chImg
 	qrs[p.ClientDeviceID] = qr
-	// http.Error(w, qr, http.StatusOK)
 	return &Response{
+		Status:  http.StatusOK,
 		Message: "success create qr",
 		Result:  map[string]string{"qr": qr},
+		Error:   nil,
 	}, nil
 }
 
@@ -136,15 +175,15 @@ func (_ *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (*Respo
 	}
 	err := json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		// http.Error(w, "server error", http.StatusInternalServerError)
-		return nil, errors.New("server error")
+		return nil, ErrServerUnexpected
 	}
 
 	cli := clients[p.DeviceID]
 	cli.Logout()
-	// http.Error(w, "ok", http.StatusOK)
 	return &Response{
+		Status:  http.StatusOK,
 		Message: "logout success",
 		Result:  map[string]any{"ok": true},
+		Error:   nil,
 	}, nil
 }

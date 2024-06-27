@@ -19,11 +19,6 @@ import (
 )
 
 var (
-	ErrServerUnexpected = errors.New("server error occurred")
-	ErrAlreadyConnected = errors.New("device already connected")
-)
-
-var (
 	DB_URL = "postgresql://postgres:toor@localhost:5432/whatsapp_api"
 )
 
