@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,7 +39,6 @@ func eventHandler(clientDeviceID string) func(evt interface{}) {
 
 func main() {
 	dbLog := waLog.Stdout("Database", "INFO", true)
-	cliLog := waLog.Stdout("abc", "INFO", true)
 
 	conn, err := pgxpool.New(context.Background(), DB_URL)
 	if err != nil {
@@ -46,7 +46,7 @@ func main() {
 	}
 
 	db := stdlib.OpenDBFromPool(conn)
-	store.SetOSInfo("YourApp", [3]uint32{0, 1, 0})
+	store.SetOSInfo(fmt.Sprintf("%s@%s", AppOs, AppVersion), AppVersions)
 	container := sqlstore.NewWithDB(db, "postgres", dbLog)
 	err = container.Upgrade()
 	if err != nil {
@@ -58,27 +58,35 @@ func main() {
 		fmt.Println("migration upgrade failed", err)
 	}
 	repo := &DeviceRepo{db}
+	defer cleanup(repo)
 
 	// restore all connections
-	devices, err := container.GetAllDevices()
+	meowDevices, err := container.GetAllDevices()
 	if err != nil {
 		panic(err)
 	}
-	for _, device := range devices {
-		var dvc *Device
-		jid := device.ID.String()
-		fmt.Println("restoring backup for", jid)
-		dvc, err = repo.GetDeviceByJID(jid)
-		if err != nil {
-			continue
-		}
-		cli := whatsmeow.NewClient(device, cliLog)
-		cli.AddEventHandler(eventHandler(dvc.ClientDeviceID))
-		cli.Connect()
-		clients[dvc.ClientDeviceID] = cli
-		fmt.Println("delete backup", jid, dvc.ClientDeviceID)
-		repo.Reset(dvc.ClientDeviceID)
+	var wg sync.WaitGroup
+	for _, device := range meowDevices {
+		wg.Add(1)
+		go func(device *store.Device) {
+			defer wg.Done()
+
+			jid := device.ID.String()
+			fmt.Println("restoring backup for", jid)
+			dvc, err := repo.GetDeviceByJID(jid)
+			if err != nil {
+				fmt.Println("error getting device:", err)
+				return
+			}
+			cli := whatsmeow.NewClient(device, waLog.Stdout(dvc.ClientDeviceID, "INFO", true))
+			cli.AddEventHandler(eventHandler(dvc.ClientDeviceID))
+			cli.Connect()
+			clients[dvc.ClientDeviceID] = cli
+			fmt.Println("delete backup", jid, dvc.ClientDeviceID)
+			repo.Reset(dvc.ClientDeviceID)
+		}(device)
 	}
+	wg.Wait()
 
 	// server
 	mux := http.NewServeMux()
@@ -88,7 +96,7 @@ func main() {
 	mux.Handle("POST /logout", Handler(wa.Logout))
 
 	server := http.Server{
-		Addr:    ":4001",
+		Addr:    fmt.Sprintf(":%s", AppPort),
 		Handler: mux,
 	}
 
@@ -108,14 +116,13 @@ func main() {
 	case err := <-svErr:
 		fmt.Println("cannot start server", err.Error())
 	}
+}
 
-	// backup
-	defer func() {
-		for deviceClientID, cli := range clients {
-			if cli.Store.ID != nil {
-				fmt.Println("backing up for", deviceClientID)
-				repo.SetJID(deviceClientID, cli.Store.ID.String())
-			}
+func cleanup(repo *DeviceRepo) {
+	for deviceClientID, cli := range clients {
+		if cli.Store.ID != nil {
+			fmt.Println("backing up for", deviceClientID)
+			repo.SetJID(deviceClientID, cli.Store.ID.String())
 		}
-	}()
+	}
 }

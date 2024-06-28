@@ -18,38 +18,6 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-type ErrCode string
-
-const (
-	EServerUnexpected ErrCode = "E000"
-	EAlreadyConnected ErrCode = "E001"
-)
-
-var (
-	ErrServerUnexpected = HTTPError{errors.New("server error occurred"), http.StatusInternalServerError, map[string]any{}, EServerUnexpected}
-	ErrAlreadyConnected = HTTPError{errors.New("device already connected"), http.StatusBadRequest, map[string]any{}, EServerUnexpected}
-)
-
-var (
-	ResponseErrUnexpected = &Response{
-		Status:  http.StatusInternalServerError,
-		Message: http.StatusText(http.StatusInternalServerError),
-		Result:  nil,
-		Error: &HTTPError{
-			Status: http.StatusInternalServerError,
-			Data:   nil,
-			Code:   EServerUnexpected,
-		},
-	}
-)
-
-type Response struct {
-	Status  int        `json:"status"`
-	Message string     `json:"name"`
-	Result  any        `json:"result"`
-	Error   *HTTPError `json:"error"`
-}
-
 type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +29,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Header().Add("Content-Type", "application/json")
-	var handlerErr HTTPError
+	var handlerErr *ErrorResponse
 
 	res, err := h(w, r)
 	if errors.As(err, &handlerErr) {
@@ -70,7 +38,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Status:  handlerErr.Status,
 			Message: handlerErr.Error(),
 			Result:  nil,
-			Error:   &handlerErr,
+			Error:   handlerErr,
 		}
 		json.NewEncoder(w).Encode(resErr)
 		return
@@ -88,13 +56,13 @@ type WhatsappHandler struct {
 	store *sqlstore.Container
 }
 
-func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Response, error) {
+func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
 	var p struct {
 		ClientDeviceID string `json:"client_device_id"`
 	}
-	err := json.NewDecoder(r.Body).Decode(&p)
+	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrServerUnexpected
+		return nil, ErrResponseServerUnexpected
 	}
 
 	var cli *whatsmeow.Client
@@ -109,16 +77,17 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 	}
 
 	if qr != "" {
-		return &Response{
+		resp = &Response{
 			Status:  http.StatusOK,
 			Message: "qr not scanned yet",
 			Result:  map[string]string{"qr": qr},
 			Error:   nil,
-		}, nil
+		}
+		return
 	}
 
 	if cli.IsLoggedIn() {
-		return nil, ErrAlreadyConnected
+		return nil, ErrResponseAlreadyConnected
 	}
 
 	cli.AddEventHandler(eventHandler(p.ClientDeviceID))
@@ -128,7 +97,7 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 	qrChan, err := cli.GetQRChannel(ctx)
 	if err != nil {
 		defer cancel()
-		return nil, ErrAlreadyConnected
+		return nil, ErrResponseAlreadyConnected
 	}
 
 	chImg := make(chan string)
@@ -161,29 +130,32 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (*Respon
 
 	qr = <-chImg
 	qrs[p.ClientDeviceID] = qr
-	return &Response{
+	resp = &Response{
 		Status:  http.StatusOK,
 		Message: "success create qr",
 		Result:  map[string]string{"qr": qr},
 		Error:   nil,
-	}, nil
+	}
+	return
 }
 
-func (_ *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (*Response, error) {
+func (_ *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
 	var p struct {
 		DeviceID string `json:"client_device_id"`
 	}
-	err := json.NewDecoder(r.Body).Decode(&p)
+	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrServerUnexpected
+		return nil, ErrResponseServerUnexpected
 	}
 
 	cli := clients[p.DeviceID]
 	cli.Logout()
-	return &Response{
+
+	resp = &Response{
 		Status:  http.StatusOK,
 		Message: "logout success",
 		Result:  map[string]any{"ok": true},
 		Error:   nil,
-	}, nil
+	}
+	return
 }
