@@ -13,9 +13,11 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
@@ -56,13 +58,15 @@ type WhatsappHandler struct {
 	store *sqlstore.Container
 }
 
+type ClientPayload struct {
+	ClientDeviceID string `json:"client_device_id"`
+}
+
 func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
-	var p struct {
-		ClientDeviceID string `json:"client_device_id"`
-	}
+	var p ClientPayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrResponseServerUnexpected
+		return nil, ErrRespServerUnexpected
 	}
 
 	var cli *whatsmeow.Client
@@ -87,7 +91,7 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	}
 
 	if cli.IsLoggedIn() {
-		return nil, ErrResponseAlreadyConnected
+		return nil, ErrRespAlreadyConnected
 	}
 
 	cli.AddEventHandler(eventHandler(p.ClientDeviceID))
@@ -97,7 +101,7 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	qrChan, err := cli.GetQRChannel(ctx)
 	if err != nil {
 		defer cancel()
-		return nil, ErrResponseAlreadyConnected
+		return nil, ErrRespAlreadyConnected
 	}
 
 	chImg := make(chan string)
@@ -140,20 +144,62 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 }
 
 func (_ *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
-	var p struct {
-		DeviceID string `json:"client_device_id"`
-	}
+	var p ClientPayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrResponseServerUnexpected
+		return nil, ErrRespServerUnexpected
 	}
 
-	cli := clients[p.DeviceID]
+	cli := clients[p.ClientDeviceID]
+	if !cli.IsLoggedIn() {
+		return nil, ErrRespNotLogin
+	}
+
 	cli.Logout()
 
 	resp = &Response{
 		Status:  http.StatusOK,
 		Message: "logout success",
+		Result:  map[string]any{"ok": true},
+		Error:   nil,
+	}
+	return
+}
+
+type SendMessagePayload struct {
+	ClientDeviceID string `json:"client_device_id"`
+	Recipient      string `json:"recipient"`
+	Message        string `json:"message"`
+}
+
+func (_ *WhatsappHandler) SendMessage(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
+	var p SendMessagePayload
+	err = json.NewDecoder(r.Body).Decode(&p)
+	if err != nil {
+		return nil, ErrRespServerUnexpected
+	}
+
+	cli := clients[p.ClientDeviceID]
+	if !cli.IsLoggedIn() {
+		return nil, ErrRespNotLogin
+	}
+	jid, err := ParseJID(p.Recipient + "@s.whatsapp.net")
+	if errors.Is(err, ErrRecipientNotFound) {
+		return nil, ErrRespRecipientNotFound
+	}
+
+	msg := &waE2E.Message{Conversation: proto.String(p.Message)}
+	if IsOnWhatsapp(cli, jid.ToNonAD().String()) {
+		r, e := cli.SendMessage(context.Background(), jid.ToNonAD(), msg)
+		fmt.Println(r)
+		if e != nil {
+			fmt.Println(e)
+		}
+	}
+
+	resp = &Response{
+		Status:  http.StatusOK,
+		Message: "message sent",
 		Result:  map[string]any{"ok": true},
 		Error:   nil,
 	}

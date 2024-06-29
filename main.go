@@ -7,16 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -26,11 +30,73 @@ var (
 var clients = make(map[string]*whatsmeow.Client)
 var qrs = make(map[string]string)
 
+func isGroupJid(jid string) bool {
+	return strings.Contains(jid, "@g.us")
+}
+
+func IsOnWhatsapp(waCli *whatsmeow.Client, jid string) bool {
+	if strings.Contains(jid, "@s.whatsapp.net") {
+		data, err := waCli.IsOnWhatsApp([]string{jid})
+		if err != nil {
+			fmt.Println("recipient not exist")
+			return false
+		}
+
+		for _, v := range data {
+			if !v.IsIn {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func ParseJID(arg string) (types.JID, error) {
+	if arg[0] == '+' {
+		arg = arg[1:]
+	}
+	if !strings.ContainsRune(arg, '@') {
+		return types.NewJID(arg, types.DefaultUserServer), nil
+	} else {
+		recipient, err := types.ParseJID(arg)
+		if err != nil {
+			fmt.Printf("invalid JID %s: %v", arg, err)
+			return recipient, ErrRecipientNotFound
+		} else if recipient.User == "" {
+			fmt.Printf("invalid JID %v: no server specified", arg)
+			return recipient, ErrRecipientNotFound
+		}
+		return recipient, nil
+	}
+}
+
 func eventHandler(clientDeviceID string) func(evt interface{}) {
 	return func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			fmt.Println("Received a message!", v.Message)
+			metaParts := []string{fmt.Sprintf("push name: %s", v.Info.PushName), fmt.Sprintf("timestamp: %s", v.Info.Timestamp)}
+			if v.Info.Type != "" {
+				metaParts = append(metaParts, fmt.Sprintf("type: %s", v.Info.Type))
+			}
+			if v.Info.Category != "" {
+				metaParts = append(metaParts, fmt.Sprintf("category: %s", v.Info.Category))
+			}
+			if v.IsViewOnce {
+				metaParts = append(metaParts, "view once")
+			}
+			fmt.Printf("Received message %s from %s (%s): %+v\n", v.Info.ID, v.Info.SourceString(), strings.Join(metaParts, ", "), v.Message)
+
+			cli := clients[clientDeviceID]
+			if cli == nil {
+				return
+			}
+			if !isGroupJid(v.Info.Chat.String()) &&
+				!strings.Contains(v.Info.SourceString(), "broadcast") &&
+				IsOnWhatsapp(cli, v.Info.Sender.ToNonAD().String()) {
+				msg := &waE2E.Message{Conversation: proto.String("Maaf sedang sibuk")}
+				_, _ = cli.SendMessage(context.Background(), v.Info.Sender.ToNonAD(), msg)
+			}
 		case *events.PairSuccess:
 			qrs[clientDeviceID] = ""
 		}
@@ -94,6 +160,7 @@ func main() {
 
 	mux.Handle("POST /qr", Handler(wa.GenQR))
 	mux.Handle("POST /logout", Handler(wa.Logout))
+	mux.Handle("POST /send-message", Handler(wa.SendMessage))
 
 	server := http.Server{
 		Addr:    fmt.Sprintf(":%s", AppPort),
