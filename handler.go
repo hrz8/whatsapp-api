@@ -10,13 +10,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/hrz8/whatsapp-api/pkg/whatsapp"
 	"github.com/mdp/qrterminal/v3"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store"
-	"go.mau.fi/whatsmeow/store/sqlstore"
-	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -55,7 +53,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type WhatsappHandler struct {
-	store *sqlstore.Container
+	waCli *whatsapp.Client
 }
 
 type ClientPayload struct {
@@ -70,14 +68,13 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	}
 
 	var cli *whatsmeow.Client
-	var deviceStore *store.Device
 
-	cli = clients[p.ClientDeviceID]
-	qr := qrs[p.ClientDeviceID]
+	cli = h.waCli.Get(p.ClientDeviceID)
+	qr := h.waCli.GetQR(p.ClientDeviceID)
 
 	if cli == nil {
-		deviceStore = h.store.NewDevice()
-		cli = whatsmeow.NewClient(deviceStore, waLog.Stdout(p.ClientDeviceID, "INFO", true))
+		cli = h.waCli.NewMeow(p.ClientDeviceID)
+		h.waCli.Set(p.ClientDeviceID, cli)
 	}
 
 	if qr != "" {
@@ -93,9 +90,6 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	if cli.IsLoggedIn() {
 		return nil, ErrRespAlreadyConnected
 	}
-
-	cli.AddEventHandler(eventHandler(p.ClientDeviceID))
-	clients[p.ClientDeviceID] = cli
 
 	ctx, cancel := context.WithCancel(context.Background())
 	qrChan, err := cli.GetQRChannel(ctx)
@@ -114,8 +108,8 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 				time.Sleep(evt.Timeout - 10*time.Second)
 				if !cli.IsLoggedIn() {
 					fmt.Println("expiring qr code...")
-					clients[p.ClientDeviceID] = nil
-					qrs[p.ClientDeviceID] = ""
+					h.waCli.Reset(p.ClientDeviceID)
+					h.waCli.ResetQR(p.ClientDeviceID)
 					cancel()
 				}
 			}()
@@ -133,7 +127,7 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	cli.Connect()
 
 	qr = <-chImg
-	qrs[p.ClientDeviceID] = qr
+	h.waCli.SetQR(p.ClientDeviceID, qr)
 	resp = &Response{
 		Status:  http.StatusOK,
 		Message: "success create qr",
@@ -143,18 +137,20 @@ func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *R
 	return
 }
 
-func (_ *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
+func (h *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
 	var p ClientPayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
 		return nil, ErrRespServerUnexpected
 	}
 
-	cli := clients[p.ClientDeviceID]
+	cli := h.waCli.Get(p.ClientDeviceID)
+	if cli == nil {
+		return nil, ErrRespNotLogin
+	}
 	if !cli.IsLoggedIn() {
 		return nil, ErrRespNotLogin
 	}
-
 	cli.Logout()
 
 	resp = &Response{
@@ -172,24 +168,28 @@ type SendMessagePayload struct {
 	Message        string `json:"message"`
 }
 
-func (_ *WhatsappHandler) SendMessage(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
+func (h *WhatsappHandler) SendMessage(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
 	var p SendMessagePayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
 		return nil, ErrRespServerUnexpected
 	}
 
-	cli := clients[p.ClientDeviceID]
+	cli := h.waCli.Get(p.ClientDeviceID)
+	if cli == nil {
+		return nil, ErrRespNotLogin
+	}
 	if !cli.IsLoggedIn() {
 		return nil, ErrRespNotLogin
 	}
-	jid, err := ParseJID(p.Recipient + "@s.whatsapp.net")
+
+	jid, err := whatsapp.ParseJID(p.Recipient + "@s.whatsapp.net")
 	if errors.Is(err, ErrRecipientNotFound) {
 		return nil, ErrRespRecipientNotFound
 	}
 
 	msg := &waE2E.Message{Conversation: proto.String(p.Message)}
-	if IsOnWhatsapp(cli, jid.ToNonAD().String()) {
+	if whatsapp.IsOnWhatsapp(cli, jid.ToNonAD().String()) {
 		r, e := cli.SendMessage(context.Background(), jid.ToNonAD(), msg)
 		fmt.Println(r)
 		if e != nil {
