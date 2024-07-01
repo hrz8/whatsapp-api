@@ -1,4 +1,4 @@
-# whatsmeow example
+# gowa api
 
 ## Usage
 
