@@ -35,7 +35,7 @@ func (h *Handler) GenQR(w http.ResponseWriter, r *http.Request) (resp *response.
 	var p ClientPayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrRespServerUnexpected
+		return nil, response.ErrRespServerUnexpected
 	}
 
 	var cli *whatsmeow.Client
@@ -112,7 +112,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) (resp *response
 	var p ClientPayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrRespServerUnexpected
+		return nil, response.ErrRespServerUnexpected
 	}
 
 	cli := h.waCli.Get(p.ClientDeviceID)
@@ -143,7 +143,7 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) (resp *res
 	var p SendMessagePayload
 	err = json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
-		return nil, ErrRespServerUnexpected
+		return nil, response.ErrRespServerUnexpected
 	}
 
 	cli := h.waCli.Get(p.ClientDeviceID)

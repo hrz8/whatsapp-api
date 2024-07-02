@@ -20,12 +20,6 @@ var (
 )
 
 var (
-	ErrRespServerUnexpected = &response.ErrorResponse{
-		E:      response.ErrServerUnexpected,
-		Status: http.StatusInternalServerError,
-		Data:   map[string]any{},
-		Code:   response.EServerUnexpected,
-	}
 	ErrRespAlreadyConnected = &response.ErrorResponse{
 		E:      ErrAlreadyConnected,
 		Status: http.StatusBadRequest,

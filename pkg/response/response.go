@@ -45,3 +45,10 @@ func (e *ErrorResponse) Error() string {
 func (e *ErrorResponse) Is(other error) bool {
 	return errors.Is(other, e.E)
 }
+
+var ErrRespServerUnexpected = &ErrorResponse{
+	E:      ErrServerUnexpected,
+	Status: http.StatusInternalServerError,
+	Data:   map[string]any{},
+	Code:   EServerUnexpected,
+}
