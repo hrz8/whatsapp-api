@@ -1,40 +1,30 @@
 package main
 
 import (
-	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"os"
-	"time"
 
-	"github.com/hrz8/whatsapp-api/pkg/whatsapp"
-	"github.com/mdp/qrterminal/v3"
-	"github.com/skip2/go-qrcode"
-	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waE2E"
-	"google.golang.org/protobuf/proto"
+	"github.com/hrz8/whatsapp-api/pkg/response"
 )
 
-type Handler func(w http.ResponseWriter, r *http.Request) (*Response, error)
+type Handler func(w http.ResponseWriter, r *http.Request) (*response.Response, error)
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
-			json.NewEncoder(w).Encode(ResponseErrUnexpected)
+			json.NewEncoder(w).Encode(response.ResponseErrUnexpected)
 			return
 		}
 	}()
 
 	w.Header().Add("Content-Type", "application/json")
-	var handlerErr *ErrorResponse
+	var handlerErr *response.ErrorResponse
 
 	res, err := h(w, r)
 	if errors.As(err, &handlerErr) {
 		w.WriteHeader(handlerErr.Status)
-		resErr := &Response{
+		resErr := &response.Response{
 			Status:  handlerErr.Status,
 			Message: handlerErr.Error(),
 			Result:  nil,
@@ -45,163 +35,9 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ResponseErrUnexpected)
+		json.NewEncoder(w).Encode(response.ResponseErrUnexpected)
 		return
 	}
 	w.WriteHeader(res.Status)
 	json.NewEncoder(w).Encode(res)
-}
-
-type WhatsappHandler struct {
-	waCli *whatsapp.Client
-}
-
-type ClientPayload struct {
-	ClientDeviceID string `json:"client_device_id"`
-}
-
-func (h *WhatsappHandler) GenQR(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
-	var p ClientPayload
-	err = json.NewDecoder(r.Body).Decode(&p)
-	if err != nil {
-		return nil, ErrRespServerUnexpected
-	}
-
-	var cli *whatsmeow.Client
-
-	cli = h.waCli.Get(p.ClientDeviceID)
-	qr := h.waCli.GetQR(p.ClientDeviceID)
-
-	if cli == nil {
-		cli = h.waCli.NewMeow(p.ClientDeviceID)
-		h.waCli.Set(p.ClientDeviceID, cli)
-	}
-
-	if qr != "" {
-		resp = &Response{
-			Status:  http.StatusOK,
-			Message: "qr not scanned yet",
-			Result:  map[string]string{"qr": qr},
-			Error:   nil,
-		}
-		return
-	}
-
-	if cli.IsLoggedIn() {
-		return nil, ErrRespAlreadyConnected
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	qrChan, err := cli.GetQRChannel(ctx)
-	if err != nil {
-		defer cancel()
-		return nil, ErrRespAlreadyConnected
-	}
-
-	chImg := make(chan string)
-
-	go func() {
-		evt := <-qrChan
-		if evt.Event == "code" {
-			qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			go func() {
-				time.Sleep(evt.Timeout - 10*time.Second)
-				if !cli.IsLoggedIn() {
-					fmt.Println("expiring qr code...")
-					h.waCli.Reset(p.ClientDeviceID)
-					h.waCli.ResetQR(p.ClientDeviceID)
-					cancel()
-				}
-			}()
-			img, err := qrcode.Encode(evt.Code, qrcode.Medium, 512)
-			if err != nil {
-				cancel()
-			}
-			base64Img := base64.StdEncoding.EncodeToString(img)
-			chImg <- "data:image/png;base64," + base64Img
-		} else {
-			fmt.Println("Login event:", evt.Event)
-		}
-	}()
-
-	cli.Connect()
-
-	qr = <-chImg
-	h.waCli.SetQR(p.ClientDeviceID, qr)
-	resp = &Response{
-		Status:  http.StatusOK,
-		Message: "success create qr",
-		Result:  map[string]string{"qr": qr},
-		Error:   nil,
-	}
-	return
-}
-
-func (h *WhatsappHandler) Logout(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
-	var p ClientPayload
-	err = json.NewDecoder(r.Body).Decode(&p)
-	if err != nil {
-		return nil, ErrRespServerUnexpected
-	}
-
-	cli := h.waCli.Get(p.ClientDeviceID)
-	if cli == nil {
-		return nil, ErrRespNotLogin
-	}
-	if !cli.IsLoggedIn() {
-		return nil, ErrRespNotLogin
-	}
-	cli.Logout()
-
-	resp = &Response{
-		Status:  http.StatusOK,
-		Message: "logout success",
-		Result:  map[string]any{"ok": true},
-		Error:   nil,
-	}
-	return
-}
-
-type SendMessagePayload struct {
-	ClientDeviceID string `json:"client_device_id"`
-	Recipient      string `json:"recipient"`
-	Message        string `json:"message"`
-}
-
-func (h *WhatsappHandler) SendMessage(w http.ResponseWriter, r *http.Request) (resp *Response, err error) {
-	var p SendMessagePayload
-	err = json.NewDecoder(r.Body).Decode(&p)
-	if err != nil {
-		return nil, ErrRespServerUnexpected
-	}
-
-	cli := h.waCli.Get(p.ClientDeviceID)
-	if cli == nil {
-		return nil, ErrRespNotLogin
-	}
-	if !cli.IsLoggedIn() {
-		return nil, ErrRespNotLogin
-	}
-
-	jid, err := whatsapp.ParseJID(p.Recipient + "@s.whatsapp.net")
-	if errors.Is(err, ErrRecipientNotFound) {
-		return nil, ErrRespRecipientNotFound
-	}
-
-	msg := &waE2E.Message{Conversation: proto.String(p.Message)}
-	if whatsapp.IsOnWhatsapp(cli, jid.ToNonAD().String()) {
-		r, e := cli.SendMessage(context.Background(), jid.ToNonAD(), msg)
-		fmt.Println(r)
-		if e != nil {
-			fmt.Println(e)
-		}
-	}
-
-	resp = &Response{
-		Status:  http.StatusOK,
-		Message: "message sent",
-		Result:  map[string]any{"ok": true},
-		Error:   nil,
-	}
-	return
 }

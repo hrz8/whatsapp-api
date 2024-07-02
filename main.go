@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/hrz8/whatsapp-api/internal/session"
 	"github.com/hrz8/whatsapp-api/pkg/whatsapp"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -71,11 +72,11 @@ func main() {
 
 	// server
 	mux := http.NewServeMux()
-	wa := &WhatsappHandler{waCli}
+	sess := session.NewHandler(waCli)
 
-	mux.Handle("POST /qr", Handler(wa.GenQR))
-	mux.Handle("POST /logout", Handler(wa.Logout))
-	mux.Handle("POST /send-message", Handler(wa.SendMessage))
+	mux.Handle("POST /qr", Handler(sess.GenQR))
+	mux.Handle("POST /logout", Handler(sess.Logout))
+	mux.Handle("POST /send-message", Handler(sess.SendMessage))
 
 	server := http.Server{
 		Addr:    fmt.Sprintf(":%s", AppPort),
