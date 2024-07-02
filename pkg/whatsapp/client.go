@@ -97,6 +97,17 @@ func (c *Client) NewMeow(clientDeviceID string) *whatsmeow.Client {
 	return cli
 }
 
+func (c *Client) initMeow(device *store.Device, clientDeviceID string) *whatsmeow.Client {
+	cliLog := waLog.Stdout("Device-"+clientDeviceID, LogLevelDevice, true)
+	cli := whatsmeow.NewClient(device, cliLog)
+	cli.AddEventHandler(c.defaultEventHandler(clientDeviceID))
+	if c.evtHandler != nil {
+		cli.AddEventHandler(c.evtHandler(cli, clientDeviceID))
+	}
+
+	return cli
+}
+
 func (c *Client) Upgrade() (err error) {
 	err = c.container.Upgrade()
 	if err != nil {
@@ -234,15 +245,4 @@ func (c *Client) Restore() {
 	}
 	wg.Wait()
 	c.log.Infof("restore done!")
-}
-
-func (c *Client) initMeow(device *store.Device, clientDeviceID string) *whatsmeow.Client {
-	cliLog := waLog.Stdout("Device-"+clientDeviceID, LogLevelDevice, true)
-	cli := whatsmeow.NewClient(device, cliLog)
-	cli.AddEventHandler(c.defaultEventHandler(clientDeviceID))
-	if c.evtHandler != nil {
-		cli.AddEventHandler(c.evtHandler(cli, clientDeviceID))
-	}
-
-	return cli
 }
