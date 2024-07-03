@@ -30,9 +30,9 @@ var (
 )
 
 type Client struct {
-	sync.Mutex
-	WA map[string]*whatsmeow.Client
-	QR map[string]string
+	mut sync.RWMutex
+	WA  map[string]*whatsmeow.Client
+	QR  map[string]string
 
 	// customable
 	osName     string
@@ -122,6 +122,9 @@ func (c *Client) Upgrade() (err error) {
 }
 
 func (c *Client) GetQR(clientDeviceID string) string {
+	c.mut.RLock()
+	defer c.mut.RUnlock()
+
 	qr := c.QR[clientDeviceID]
 	if qr == "" {
 		c.log.Warnf("cannot find qrcode fo id: %v", clientDeviceID)
@@ -131,8 +134,8 @@ func (c *Client) GetQR(clientDeviceID string) string {
 }
 
 func (c *Client) SetQR(clientDeviceID string, qr string) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mut.Lock()
+	defer c.mut.Unlock()
 
 	curr := c.GetQR(clientDeviceID)
 	if curr != "" {
@@ -144,8 +147,8 @@ func (c *Client) SetQR(clientDeviceID string, qr string) error {
 }
 
 func (c *Client) ResetQR(clientDeviceID string) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mut.Lock()
+	defer c.mut.Unlock()
 
 	curr := c.GetQR(clientDeviceID)
 	if curr == "" {
@@ -157,6 +160,8 @@ func (c *Client) ResetQR(clientDeviceID string) error {
 }
 
 func (c *Client) Get(clientDeviceID string) *whatsmeow.Client {
+	c.mut.RLock()
+	defer c.mut.RUnlock()
 	cli := c.WA[clientDeviceID]
 	if cli == nil {
 		c.log.Warnf("cannot find whatsapp client with id: %v", clientDeviceID)
@@ -166,8 +171,8 @@ func (c *Client) Get(clientDeviceID string) *whatsmeow.Client {
 }
 
 func (c *Client) Set(clientDeviceID string, cli *whatsmeow.Client) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mut.Lock()
+	defer c.mut.Unlock()
 
 	curr := c.Get(clientDeviceID)
 	if curr != nil {
@@ -179,8 +184,8 @@ func (c *Client) Set(clientDeviceID string, cli *whatsmeow.Client) error {
 }
 
 func (c *Client) Reset(clientDeviceID string) error {
-	c.Lock()
-	defer c.Unlock()
+	c.mut.Lock()
+	defer c.mut.Unlock()
 
 	curr := c.Get(clientDeviceID)
 	if curr == nil {
