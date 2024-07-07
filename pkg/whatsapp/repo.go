@@ -13,7 +13,7 @@ type DeviceRepo struct {
 }
 
 func (r *DeviceRepo) GetDeviceByJID(jid string) (*Device, error) {
-	row := r.db.QueryRow(`SELECT id, client_device_id, jid from whatsmeow_extended_device`)
+	row := r.db.QueryRow(`SELECT id, client_device_id, jid from whatsmeow_extended_device WHERE jid = $1`, jid)
 	var i Device
 	err := row.Scan(
 		&i.ID,

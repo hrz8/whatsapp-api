@@ -134,27 +134,25 @@ func (c *Client) GetQR(clientDeviceID string) string {
 }
 
 func (c *Client) SetQR(clientDeviceID string, qr string) error {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	curr := c.GetQR(clientDeviceID)
 	if curr != "" {
 		c.log.Errorf("cannot reassign qrcode for id: %v", clientDeviceID)
 		return ErrQRAlreadyExist
 	}
+	c.mut.Lock()
+	defer c.mut.Unlock()
 	c.QR[clientDeviceID] = qr
 	return nil
 }
 
 func (c *Client) ResetQR(clientDeviceID string) error {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	curr := c.GetQR(clientDeviceID)
 	if curr == "" {
 		c.log.Errorf("cannot find qrcode fo id: %v", clientDeviceID)
 		return ErrQRNotExist
 	}
+	c.mut.Lock()
+	defer c.mut.Unlock()
 	c.QR[clientDeviceID] = ""
 	return nil
 }
@@ -171,27 +169,25 @@ func (c *Client) Get(clientDeviceID string) *whatsmeow.Client {
 }
 
 func (c *Client) Set(clientDeviceID string, cli *whatsmeow.Client) error {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	curr := c.Get(clientDeviceID)
 	if curr != nil {
 		c.log.Errorf("cannot reassigned whatsapp client with id: %v", clientDeviceID)
 		return ErrClientAlreadyExist
 	}
+	c.mut.Lock()
+	defer c.mut.Unlock()
 	c.WA[clientDeviceID] = cli
 	return nil
 }
 
 func (c *Client) Reset(clientDeviceID string) error {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	curr := c.Get(clientDeviceID)
 	if curr == nil {
 		c.log.Errorf("cannot find qrcode for id: %v", clientDeviceID)
 		return ErrClientNotExist
 	}
+	c.mut.Lock()
+	defer c.mut.Unlock()
 	c.WA[clientDeviceID] = nil
 	return nil
 }
